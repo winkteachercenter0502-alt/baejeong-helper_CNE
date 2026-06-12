@@ -126,7 +126,7 @@
 </head>
 <body>
 <div class="container">
-  <h1>📋 회원 배정 도우미 (4교사 전용)</h1>
+  <h1>📋 회원 배정 도우미 (6-8 CNE 최유정팀 전용)</h1>
   <p class="subtitle">두 엑셀 파일을 업로드하면 배정이 필요한 회원과 각 교사의 가능 시간대를 자동으로 비교합니다. (박현수·이현희A·황미애·황희경 전용 우선순위 안내 포함)</p>
 
   <!-- 파일 업로드 -->
@@ -257,7 +257,7 @@ let membersData = [], teachersData = [], matchResults = [];
 let lastRandomAssign = null; // { n, perTeacher, unassigned } - 엑셀 다운로드에서 사용
 let selectedProducts = [];
 
-// ========== 4교사 전용 우선순위 안내 ==========
+// ========== 6-8 CNE 최유정팀 전용 우선순위 안내 ==========
 // 박현수 / 이현희A / 황미애 / 황희경 — 교사명은 parseTabName()이 추출하는 teacherName과
 // 정확히 일치해야 안내 박스가 표시됨
 const TEACHER_PRIORITY_NOTES = {
