@@ -336,11 +336,16 @@ function getGroupRecommendedSlot(teacher, members, levelStr) {
     .map(k => slotLists[0].find(s => `${s.day}-${s.time}` === k))
     .filter(Boolean);
 
-  // 그룹 전체가 들어가도 8명을 넘지 않는 슬롯을 우선 후보로
-  const fitting = candidates.filter(s => s.currentCount + members.length <= 8);
-  const pool = fitting.length > 0 ? fitting : candidates;
+  // 7시 이후(피크타임)보다 4~6시30분(이른 시간) 공통 슬롯이 있으면 그쪽을 우선 추천
+  // (7시 이후는 자리가 빨리 차므로, 이른 시간도 가능한 회원에게는 추천하지 않음)
+  const earlyCandidates = candidates.filter(s => !isLateSlot(s));
+  const candidatePool = earlyCandidates.length > 0 ? earlyCandidates : candidates;
 
-  // 4교사 우선순위 규칙(있으면) → 자리 여유가 많은 슬롯 순으로 정렬해 가장 적합한 슬롯 선택
+  // 그룹 전체가 들어가도 8명을 넘지 않는 슬롯을 우선 후보로
+  const fitting = candidatePool.filter(s => s.currentCount + members.length <= 8);
+  const pool = fitting.length > 0 ? fitting : candidatePool;
+
+  // 4교사 우선순위 규칙(있으면) → 이미 인원이 있는(자리만 남은) 슬롯을 우선 정렬해 가장 적합한 슬롯 선택
   const prioCfg = TEACHER_PRIORITY_CONFIG[teacher.teacherName];
   const sorted = pool.slice().sort((a, b) => {
     if (prioCfg) {
@@ -348,7 +353,8 @@ function getGroupRecommendedSlot(teacher, members, levelStr) {
       const rb = getSlotPriorityRank(teacher.teacherName, levelStr, b);
       if (ra !== rb) return ra - rb;
     }
-    return a.currentCount - b.currentCount;
+    // 이미 인원이 있는(자리만 비어있는) 슬롯을 완전히 빈 슬롯보다 우선
+    return b.currentCount - a.currentCount;
   });
   return sorted[0] || null;
 }
@@ -472,6 +478,34 @@ const EXACT_FIT_COUNT = 7;
 function isExactFitSlot(slot) { return !!slot && slot.currentCount >= EXACT_FIT_COUNT; }
 function hasExactFitMatch(matches) {
   return (matches || []).some(mt => mt.hasSlots && !mt.videoRefused && mt.availableSlots.some(isExactFitSlot));
+}
+
+// 그룹 배정(0.7단계)에서 한 번에 한 슬롯에 채우는 최대 인원수
+// 8명 정원이 비어있어도 한 번의 임의배정에서 8명을 다 채우면 다음에 다른 회원을
+// 추가로 넣을 자리가 없어지므로, 한 번에는 이 인원수까지만 모아서 배정
+const GROUP_FILL_CAP = 4;
+
+// 회원이 매칭 가능한 시간 중 "가장 빨리 시작할 수 있는 시간"의 인덱스
+// (값이 클수록 이른 시간대 옵션이 없고 늦은 시간대만 가능한 회원)
+function getLateScore(r) {
+  let minIdx = -1;
+  (r.matches || []).forEach(m => {
+    if (!m.hasSlots || m.videoRefused) return;
+    (m.availableSlots || []).forEach(s => {
+      const idx = TIME_SLOTS.indexOf(s.time);
+      if (idx < 0) return;
+      if (minIdx === -1 || idx < minIdx) minIdx = idx;
+    });
+  });
+  return minIdx;
+}
+
+// "7시 이후"(피크타임) 슬롯 기준 — 이 시간대는 자리가 빨리 차므로, 4~6시30분도 가능한
+// 회원은 그룹 배정 시 7시 이후 슬롯을 쓰지 않고 4~6시30분 슬롯(이미 생성된 방 우선,
+// 없으면 새로 생성)을 사용해 7시 이후 자리를 정말 필요한(7시 이후만 가능한) 회원에게 남겨둠
+const LATE_TIME_IDX = TIME_SLOTS.indexOf('7:00');
+function isLateSlot(slot) {
+  return !!slot && TIME_SLOTS.indexOf(slot.time) >= LATE_TIME_IDX;
 }
 // 엑셀 셀 노란색 강조 스타일 (화면의 badge-yellow/.slot-item.warn 과 동일한 의미)
 const XLSX_YELLOW_FILL = { fill: { patternType: 'solid', fgColor: { rgb: 'FFF59D' } } };
@@ -1606,6 +1640,10 @@ function randomAssign() {
   const shuffledMembers = matchResults.slice().sort(() => Math.random() - 0.5);
   const shuffledTeachers = teachersData.slice().sort(() => Math.random() - 0.5);
 
+  // 늦은 시간만 가능한(이른 시간 옵션이 없는) 회원을 우선 배정 순서 앞쪽으로 정렬
+  // (Array.sort는 안정 정렬이라 같은 점수끼리는 위의 무작위 셔플 순서가 유지됨)
+  shuffledMembers.sort((a, b) => getLateScore(b) - getLateScore(a));
+
   // 0. 우선 배정: "딱 맞는"(마감임박, 7/8 → 이 회원 배정 시 8/8 완성) 매칭이 있는 회원은
   //    라운드로빈보다 먼저 배정해 마감 기회를 놓치지 않도록 함
   matchResults.forEach(r => { r._exactFitPicked = false; r._urgentPicked = false; });
@@ -1646,6 +1684,10 @@ function randomAssign() {
   // → 같은 레벨 회원이 2명 이상 한 교사에게 매칭되고, 그 교사에게서 공통으로 가능한 시간대가 있으면
   //    (남은 정원과 8명 정원을 고려해 가능한 만큼) 그 시간대로 함께 배정
   matchResults.forEach(r => { r._groupRec = null; r._groupPicked = false; });
+  // 이번 0.7단계에서 슬롯별로 새로 추가된 인원수 누적 (slot.key 기준)
+  // → slot.currentCount는 임의배정 시작 시점 값이라 같은 슬롯이 여러 번 선택돼도
+  //    변하지 않으므로, 8명 정원/필터링 인원 캡 계산 시 이 값을 더해서 사용
+  const slotAddedCount = {};
   let groupProgress = true;
   while (groupProgress) {
     groupProgress = false;
@@ -1676,7 +1718,12 @@ function randomAssign() {
         const slotMap = new Map(); // key -> { slot, members: [] }
         candidates.forEach(r => {
           const mt = r.matches.find(m => m.teacher.tabName === teacher.tabName && m.hasSlots && !m.videoRefused);
+          // 4~6시30분(이른 시간) 슬롯도 가능한 회원인지 확인
+          const hasEarlyOption = mt.availableSlots.some(s => !isLateSlot(s));
           mt.availableSlots.forEach(s => {
+            // 이른 시간도 가능한 회원은 7시 이후(피크타임) 슬롯으로 그룹화하지 않음
+            // → 7시 이후 자리는 7시 이후만 가능한 회원을 위해 남겨둠
+            if (isLateSlot(s) && hasEarlyOption) return;
             const key = `${s.day}-${s.time}`;
             if (!slotMap.has(key)) slotMap.set(key, { slot: s, members: [] });
             slotMap.get(key).members.push(r);
@@ -1684,19 +1731,34 @@ function randomAssign() {
         });
 
         slotMap.forEach(({ slot, members }) => {
-          const capacity = 8 - slot.currentCount;
+          // slot.currentCount는 임의배정 시작 시점 값이므로, 이번 0.7단계에서 같은 슬롯에
+          // 이미 추가된 인원(slotAddedCount)을 더해 실제 인원수를 계산
+          const addedSoFar = slotAddedCount[slot.key] || 0;
+          const effectiveCount = slot.currentCount + addedSoFar;
+          if (effectiveCount >= 8) return; // 이미 마감된 슬롯(이번 배정 중 추가분 포함)
+
+          // 한 슬롯에 한 번에 채우는 인원은 GROUP_FILL_CAP(기본 4명)까지로 제한
+          // → 8명 정원이 비어있어도 이번 한 번의 임의배정에서 8명을 다 채우면
+          //    다음에 다른 회원을 추가로 넣을 자리가 없어지므로
+          const capacity = Math.min(8 - effectiveCount, GROUP_FILL_CAP);
           const groupSize = Math.min(members.length, capacity, room);
           if (groupSize < 2) return;
 
           // 4교사 우선순위 규칙(있으면) 적용 - 우선 시간대일수록 더 좋은 그룹으로 평가
           const prioCfg = TEACHER_PRIORITY_CONFIG[teacher.teacherName];
           const rank = prioCfg ? getSlotPriorityRank(teacher.teacherName, lv, slot) : 0;
+          // 이미 인원이 있는(자리만 비어있는) 슬롯을 완전히 빈 슬롯보다 먼저 채움
+          const filled = effectiveCount > 0;
 
-          // 더 많은 인원을 모을 수 있는 조합을 우선, 동률이면 우선순위 규칙(rank)이 좋은 쪽
-          if (!globalBest ||
-              groupSize > globalBest.groupSize ||
-              (groupSize === globalBest.groupSize && rank < globalBest.rank)) {
-            globalBest = { teacher, slot, members: members.slice(0, groupSize), groupSize, rank };
+          // 우선순위: ①이미 인원이 있는 슬롯 우선 → ②더 많은 인원을 모을 수 있는 조합 →
+          // ③우선순위 규칙(rank)이 좋은 쪽
+          const better = !globalBest
+            || (filled && !globalBest.filled)
+            || (filled === globalBest.filled && groupSize > globalBest.groupSize)
+            || (filled === globalBest.filled && groupSize === globalBest.groupSize && rank < globalBest.rank);
+
+          if (better) {
+            globalBest = { teacher, slot, members: members.slice(0, groupSize), groupSize, rank, filled };
           }
         });
       });
@@ -1710,6 +1772,7 @@ function randomAssign() {
         r._groupPicked = true;
         r._groupRec = slot;
       });
+      slotAddedCount[slot.key] = (slotAddedCount[slot.key] || 0) + members.length;
       groupProgress = true;
     }
   }
