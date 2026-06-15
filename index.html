@@ -72,6 +72,7 @@
   .badge-yellow { background: var(--yellow-light); color: var(--yellow); }
   .badge-red { background: var(--red-light); color: var(--red); }
   .badge-gray { background: var(--gray-light); color: var(--gray); border: 1px solid var(--gray-border); }
+  .badge-orange { background: #fff0e6; color: var(--orange); border: 1px solid var(--orange); }
   .slot-list { display: flex; flex-direction: column; gap: 4px; }
   .slot-item { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 4px 8px; background: var(--green-light); border: 1px solid var(--green-border); border-radius: 6px; white-space: nowrap; }
   .slot-item.warn { background: var(--yellow-light); border-color: var(--yellow-border); }
@@ -83,6 +84,9 @@
   .guidelines-box { background: var(--blue-light); border: 1px solid var(--blue-border); border-radius: 8px; padding: 12px; margin-bottom: 16px; }
   .guidelines-box h3 { font-size: 13px; font-weight: 700; color: var(--orange); margin-bottom: 6px; }
   .guidelines-box p { font-size: 13px; white-space: pre-wrap; color: var(--text-sub); }
+  .priority-box { background: var(--yellow-light); border: 1px solid var(--yellow-border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
+  .priority-box h4 { font-size: 12px; font-weight: 700; color: var(--yellow); margin-bottom: 4px; }
+  .priority-box p { font-size: 12px; white-space: pre-wrap; color: var(--text-sub); }
   .no-data { text-align: center; padding: 40px; color: var(--text-muted); }
   .no-data .big { font-size: 40px; margin-bottom: 8px; }
   .progress-wrap { display: none; }
@@ -123,8 +127,8 @@
 </head>
 <body>
 <div class="container">
-  <h1>📋 회원 배정 도우미</h1>
-  <p class="subtitle">두 엑셀 파일을 업로드하면 배정이 필요한 회원과 각 교사의 가능 시간대를 자동으로 비교합니다.</p>
+  <h1>📋 회원 배정 도우미 (6-8 CNE 최유정팀 전용)</h1>
+  <p class="subtitle">두 엑셀 파일을 업로드하면 배정이 필요한 회원과 각 교사의 가능 시간대를 자동으로 비교합니다. (박현수·이현희A·황미애·황희경 전용 우선순위 안내 포함)</p>
 
   <!-- 파일 업로드 -->
   <div class="card">
@@ -254,6 +258,107 @@ let membersData = [], teachersData = [], matchResults = [];
 let lastRandomAssign = null; // { n, perTeacher, unassigned } - 엑셀 다운로드에서 사용
 let selectedProducts = [];
 
+// ========== 6-8 CNE 최유정팀 전용 우선순위 안내 ==========
+// 박현수 / 이현희A / 황미애 / 황희경 — 교사명은 parseTabName()이 추출하는 teacherName과
+// 정확히 일치해야 안내 박스가 표시됨
+const TEACHER_PRIORITY_NOTES = {
+  '박현수': `[파닉스, LV 1~2]
+- 파닉스: 월요일 7시·7시30분·8시30분 / 화요일 7~9시
+- 1,2레벨: 수·목·금요일을 먼저 채운 후 월·화요일 채우기 예정 (4시~7시 수업부터 채울 예정)`,
+  '이현희A': `[파닉스, LV1, LV4]
+- 파닉스: 수요일 7~9시 / 목요일 7시·8시 / 금요일 7~9시
+- 1,4레벨: 월·화요일을 먼저 채운 후 수·목·금요일 채우기 예정 (4시~7시 수업부터 채울 예정)`,
+  '황미애': `[LV 1~3]
+- 코스북 1,2,3레벨`,
+  '황희경': `[LV 1,3,4,5]
+- 코스북 1,3,4,5레벨: 3,4,5레벨은 7시 이후로 채울 예정`
+};
+
+// 매칭/임의배정에 실제로 반영되는 4교사 우선순위 규칙
+// - phonicsSlots: 파닉스 레벨 학생에게 허용되는 (요일-시간) 슬롯만 매칭 (하드 필터)
+// - courseLevels + primaryDays/secondaryDays: 해당 레벨 학생은 primaryDays(4시~7시 먼저, 그 다음 7시 이후)를
+//   secondaryDays보다 먼저 채우도록 우선순위 부여 (소프트 우선순위 - 자리 남으면 다른 시간대도 배정)
+// - afterSevenLevels: 해당 레벨 학생은 7시 이후 시간대를 먼저 채우도록 우선순위 부여
+const TEACHER_PRIORITY_CONFIG = {
+  '박현수': {
+    phonicsSlots: new Set(['월-7:00','월-7:30','월-8:30','화-7:00','화-7:30','화-8:00','화-8:30']),
+    courseLevels: ['1','2'],
+    primaryDays: ['수','목','금'],
+    secondaryDays: ['월','화']
+  },
+  '이현희A': {
+    phonicsSlots: new Set(['수-7:00','수-7:30','수-8:00','수-8:30','목-7:00','목-8:00','금-7:00','금-7:30','금-8:00','금-8:30']),
+    courseLevels: ['1','4'],
+    primaryDays: ['월','화'],
+    secondaryDays: ['수','목','금']
+  },
+  '황희경': {
+    afterSevenLevels: ['3','4','5']
+  }
+};
+
+// 슬롯의 배정 우선순위 점수 계산 (작을수록 우선). 규칙 없는 경우 0.
+function getSlotPriorityRank(teacherName, levelStr, slot) {
+  const cfg = TEACHER_PRIORITY_CONFIG[teacherName];
+  if (!cfg) return 0;
+  const isEarly = TIME_SLOTS.indexOf(slot.time) < TIME_SLOTS.indexOf('7:00'); // 4시~6시30분대
+
+  if (cfg.courseLevels && levelStr && cfg.courseLevels.includes(levelStr)) {
+    const dayRank = cfg.primaryDays.includes(slot.day) ? 0 : (cfg.secondaryDays.includes(slot.day) ? 1 : 2);
+    const timeRank = isEarly ? 0 : 1;
+    return dayRank * 2 + timeRank;
+  }
+  if (cfg.afterSevenLevels && levelStr && cfg.afterSevenLevels.includes(levelStr)) {
+    return isEarly ? 1 : 0;
+  }
+  return 0;
+}
+
+// 같은 교사에게 배정된 같은 레벨 회원들을 한 시간대에 모을 수 있는 "추천 시간" 계산
+// (예: 임의배정 회원 3명이 레벨1이면 셋이 함께 들을 수 있는 공통 시간대를 추천)
+function getGroupRecommendedSlot(teacher, members, levelStr) {
+  if (members.length < 2) return null;
+  const slotLists = members.map(r => {
+    const mt = r.matches.find(m => m.teacher.tabName === teacher.tabName && m.hasSlots && !m.videoRefused);
+    return mt ? mt.availableSlots : [];
+  });
+  if (slotLists.some(list => list.length === 0)) return null;
+
+  // 모든 회원이 공통으로 가능한 (요일-시간) 슬롯 교집합
+  let common = slotLists[0].map(s => `${s.day}-${s.time}`);
+  for (let i = 1; i < slotLists.length; i++) {
+    const keys = new Set(slotLists[i].map(s => `${s.day}-${s.time}`));
+    common = common.filter(k => keys.has(k));
+  }
+  if (common.length === 0) return null;
+
+  const candidates = common
+    .map(k => slotLists[0].find(s => `${s.day}-${s.time}` === k))
+    .filter(Boolean);
+
+  // 그룹 전체가 들어가도 8명을 넘지 않는 슬롯을 우선 후보로
+  const fitting = candidates.filter(s => s.currentCount + members.length <= 8);
+  const pool = fitting.length > 0 ? fitting : candidates;
+
+  // 4교사 우선순위 규칙(있으면) → 자리 여유가 많은 슬롯 순으로 정렬해 가장 적합한 슬롯 선택
+  const prioCfg = TEACHER_PRIORITY_CONFIG[teacher.teacherName];
+  const sorted = pool.slice().sort((a, b) => {
+    if (prioCfg) {
+      const ra = getSlotPriorityRank(teacher.teacherName, levelStr, a);
+      const rb = getSlotPriorityRank(teacher.teacherName, levelStr, b);
+      if (ra !== rb) return ra - rb;
+    }
+    return a.currentCount - b.currentCount;
+  });
+  return sorted[0] || null;
+}
+
+// 슬롯 객체를 "화 6:00 (A주)" 형태의 문자열로 표시
+function formatSlot(slot) {
+  if (!slot) return '';
+  return `${slot.day} ${slot.time}${slot.assignedWeek ? ' ' + slot.assignedWeek : ''}`;
+}
+
 function toggleProduct(el) {
   const val = el.value;
   if (el.checked) { if (!selectedProducts.includes(val)) selectedProducts.push(val); }
@@ -265,8 +370,10 @@ function productMatch(productStr) {
   if (!productStr) return false;
   const p = productStr.trim();
   // 약정기간 제거 후 비교 (1년/2년/3년 자동 무시)
+  // 체크박스 목록도 동일하게 stripYear()한 값을 기준으로 만들어지므로 정확히 일치하는 경우만 매칭
+  // (예: "캐츠잉글리시"만 선택했을 때 "자기주도학습표+캐츠잉글리시" 같은 결합상품이 같이 포함되는 것을 방지)
   const base = stripYear(p);
-  return selectedProducts.some(sel => base === sel || base.startsWith(sel) || base.includes(sel));
+  return selectedProducts.includes(base);
 }
 
 // 상품명에서 약정기간(1년/2년/3년 등) 제거
@@ -368,6 +475,8 @@ function hasExactFitMatch(matches) {
 }
 // 엑셀 셀 노란색 강조 스타일 (화면의 badge-yellow/.slot-item.warn 과 동일한 의미)
 const XLSX_YELLOW_FILL = { fill: { patternType: 'solid', fgColor: { rgb: 'FFF59D' } } };
+const XLSX_RED_FILL = { fill: { patternType: 'solid', fgColor: { rgb: 'FFCDD2' } } };
+const XLSX_ORANGE_FILL = { fill: { patternType: 'solid', fgColor: { rgb: 'FFE0B2' } } };
 
 // ========== 파일 업로드 ==========
 document.getElementById('file1').addEventListener('change', e => handleFile(e, 1));
@@ -473,9 +582,16 @@ function firstWeekCell(m) {
 function productCell(m) {
   return m.product || '';
 }
-// 단과여부: 상품명이 정확히 "캐츠잉글리시"인 경우만 "단과" (캐츠잉글리시+캐츠홈 등 결합상품은 단과 아님)
+// 단과여부: 상품명이 "캐츠잉글리시" 또는 "캐츠잉글리시 1~3년"(+옵션 표기)인 경우 "단과"
+// (캐츠잉글리시+캐츠홈 등 다른 상품과 결합된 경우는 단과 아님)
 function singleCourseCell(m) {
-  return (m.product || '').trim() === '캐츠잉글리시' ? '단과' : '';
+  const p = (m.product || '').trim();
+  if (!p.startsWith('캐츠잉글리시') || p.includes('+')) return '';
+  const rest = p.slice('캐츠잉글리시'.length).trim();
+  // "캐츠잉글리시" 단독, 또는 "캐츠잉글리시 1년"~"캐츠잉글리시 3년"(뒤에 (N) 등 부가표기 허용)
+  if (rest === '') return '단과';
+  if (/^[1-3]년/.test(rest)) return '단과';
+  return '';
 }
 // 배정 불가 회원 여부: 매칭되는 가능 슬롯(hasSlots)이 전혀 없는 경우
 function isUnassignable(r) {
@@ -859,7 +975,6 @@ function deriveLevelsFromMembers(membersInTab) {
   });
   return [...set];
 }
-
 // ========== 파싱: 스케줄러 파일 (genN: 매주/격주 A주B주) ==========
 function parseTeacherTabGenN(tabName, info, levels, aoa) {
   const slotA = {}, slotB = {}; // key: "요일-시간" → 인원수
@@ -1038,6 +1153,9 @@ function matchAll(members, teachers) {
         return;
       }
 
+      // 4교사 우선순위 규칙
+      const prioCfg = TEACHER_PRIORITY_CONFIG[teacher.teacherName];
+
       const teacherSlots = [];
       teacher.availableSlots.forEach(slot => {
         if (!slot.available) return;
@@ -1047,6 +1165,9 @@ function matchAll(members, teachers) {
 
         // 불가 시간 필터
         if (member.blockedSlots.has(slot.time)) return;
+
+        // 파닉스 전용 시간대 제한 (박현수/이현희A): 파닉스 레벨 학생은 지정된 (요일-시간) 슬롯만 매칭
+        if (prioCfg && prioCfg.phonicsSlots && levelStr === '파닉스' && !prioCfg.phonicsSlots.has(`${slot.day}-${slot.time}`)) return;
 
         const key = `${teacher.tabName}-${slot.day}-${slot.time}`;
 
@@ -1091,10 +1212,15 @@ function matchAll(members, teachers) {
       });
 
       if (levelOk && teacherSlots.length > 0) {
+        // 4교사 우선순위 규칙에 따라 가능 시간 정렬 (우선 시간대가 앞에 오도록)
+        if (prioCfg) {
+          teacherSlots.sort((a, b) => getSlotPriorityRank(teacher.teacherName, levelStr, a) - getSlotPriorityRank(teacher.teacherName, levelStr, b));
+        }
         matches.push({
           teacher, levelOk,
           availableSlots: teacherSlots,
-          hasSlots: teacherSlots.length > 0
+          hasSlots: teacherSlots.length > 0,
+          bestPriorityRank: prioCfg ? getSlotPriorityRank(teacher.teacherName, levelStr, teacherSlots[0]) : 0
         });
       }
     });
@@ -1396,6 +1522,12 @@ function renderTeacherPanels() {
       slotTable += '</tbody></table></div>';
     }
 
+    // 4교사(박현수/이현희A/황미애/황희경) 전용 우선순위 안내 박스
+    const priorityNote = TEACHER_PRIORITY_NOTES[teacher.teacherName];
+    const priorityHtml = priorityNote
+      ? `<div class="priority-box"><h4>📌 ${teacher.teacherName} 우선순위 안내</h4><p>${priorityNote}</p></div>`
+      : '';
+
     html += `
     <div class="teacher-section">
       <div class="teacher-header">
@@ -1404,6 +1536,7 @@ function renderTeacherPanels() {
         <span class="badge badge-gray">현재 ${teacher.totalMembers}명</span>
         <span class="badge ${assignable.length > 0 ? 'badge-green' : 'badge-gray'}">배정가능 ${assignable.length}명</span>
       </div>
+      ${priorityHtml}
       <details>
         <summary>가능 시간대 보기 (${availSlots.length}개 슬롯)</summary>
         <div>${slotTable}</div>
@@ -1475,7 +1608,7 @@ function randomAssign() {
 
   // 0. 우선 배정: "딱 맞는"(마감임박, 7/8 → 이 회원 배정 시 8/8 완성) 매칭이 있는 회원은
   //    라운드로빈보다 먼저 배정해 마감 기회를 놓치지 않도록 함
-  matchResults.forEach(r => { r._exactFitPicked = false; });
+  matchResults.forEach(r => { r._exactFitPicked = false; r._urgentPicked = false; });
   shuffledMembers.forEach(r => {
     if (used.has(r.member.cas)) return;
     if (!hasExactFitMatch(r.matches)) return;
@@ -1491,14 +1624,117 @@ function randomAssign() {
     r._exactFitPicked = true;
   });
 
+  // 0.5 우선 배정: 특이사항(AK열)에 "빠른"이 포함된 회원은 라운드로빈보다 먼저 배정
+  // → 가능 인원이 정원보다 많아 일부만 배정되는 경우에도 "빠른" 회원이 먼저 자리를 차지함
+  shuffledMembers.forEach(r => {
+    if (used.has(r.member.cas)) return;
+    if (!(r.member.note || '').includes('빠른')) return;
+    const candidates = r.matches.filter(mt2 =>
+      mt2.hasSlots && !mt2.videoRefused &&
+      perTeacher[mt2.teacher.tabName].picked.length < n
+    );
+    if (candidates.length === 0) return;
+    // 매칭 가능한 교사가 여럿이면, 4교사 우선순위 규칙(bestPriorityRank)이 더 맞는 교사를 선택
+    const mt = candidates.reduce((best, m) =>
+      (m.bestPriorityRank ?? 0) < (best.bestPriorityRank ?? 0) ? m : best, candidates[0]);
+    used.add(r.member.cas);
+    perTeacher[mt.teacher.tabName].picked.push(r);
+    r._urgentPicked = true;
+  });
+
+  // 0.7 우선 배정: 같은 레벨 회원을 같은 교사 + 같은 시간대로 모아서 한 반으로 배정
+  // → 같은 레벨 회원이 2명 이상 한 교사에게 매칭되고, 그 교사에게서 공통으로 가능한 시간대가 있으면
+  //    (남은 정원과 8명 정원을 고려해 가능한 만큼) 그 시간대로 함께 배정
+  matchResults.forEach(r => { r._groupRec = null; r._groupPicked = false; });
+  let groupProgress = true;
+  while (groupProgress) {
+    groupProgress = false;
+
+    // 레벨별로 아직 배정되지 않은 회원 그룹화
+    const byLevel = {};
+    shuffledMembers.forEach(r => {
+      if (used.has(r.member.cas)) return;
+      const lv = r.member.level || '';
+      (byLevel[lv] = byLevel[lv] || []).push(r);
+    });
+
+    // 모든 (레벨 × 교사 × 시간대) 조합 중 가장 많이 모을 수 있는 조합 선택
+    let globalBest = null; // { teacher, slot, members, groupSize, rank }
+    Object.entries(byLevel).forEach(([lv, levelMembers]) => {
+      if (levelMembers.length < 2) return;
+
+      shuffledTeachers.forEach(teacher => {
+        const room = n - perTeacher[teacher.tabName].picked.length;
+        if (room < 2) return;
+
+        const candidates = levelMembers.filter(r =>
+          r.matches.some(m => m.teacher.tabName === teacher.tabName && m.hasSlots && !m.videoRefused)
+        );
+        if (candidates.length < 2) return;
+
+        // 후보별 가능 시간대를 (요일-시간) 키로 모음
+        const slotMap = new Map(); // key -> { slot, members: [] }
+        candidates.forEach(r => {
+          const mt = r.matches.find(m => m.teacher.tabName === teacher.tabName && m.hasSlots && !m.videoRefused);
+          mt.availableSlots.forEach(s => {
+            const key = `${s.day}-${s.time}`;
+            if (!slotMap.has(key)) slotMap.set(key, { slot: s, members: [] });
+            slotMap.get(key).members.push(r);
+          });
+        });
+
+        slotMap.forEach(({ slot, members }) => {
+          const capacity = 8 - slot.currentCount;
+          const groupSize = Math.min(members.length, capacity, room);
+          if (groupSize < 2) return;
+
+          // 4교사 우선순위 규칙(있으면) 적용 - 우선 시간대일수록 더 좋은 그룹으로 평가
+          const prioCfg = TEACHER_PRIORITY_CONFIG[teacher.teacherName];
+          const rank = prioCfg ? getSlotPriorityRank(teacher.teacherName, lv, slot) : 0;
+
+          // 더 많은 인원을 모을 수 있는 조합을 우선, 동률이면 우선순위 규칙(rank)이 좋은 쪽
+          if (!globalBest ||
+              groupSize > globalBest.groupSize ||
+              (groupSize === globalBest.groupSize && rank < globalBest.rank)) {
+            globalBest = { teacher, slot, members: members.slice(0, groupSize), groupSize, rank };
+          }
+        });
+      });
+    });
+
+    if (globalBest) {
+      const { teacher, slot, members } = globalBest;
+      members.forEach(r => {
+        used.add(r.member.cas);
+        perTeacher[teacher.tabName].picked.push(r);
+        r._groupPicked = true;
+        r._groupRec = slot;
+      });
+      groupProgress = true;
+    }
+  }
+
   for (let round = 0; round < n; round++) {
     let progress = false;
     shuffledTeachers.forEach(teacher => {
       if (perTeacher[teacher.tabName].picked.length >= n) return;
-      const candidate = shuffledMembers.find(r =>
+      // 4교사 우선순위 규칙: 같은 후보 중 우선순위 점수(bestPriorityRank)가 낮은(=우선 시간대) 회원을 먼저 배정
+      const eligible = shuffledMembers.filter(r =>
         !used.has(r.member.cas) &&
         r.matches.some(m => m.teacher.tabName === teacher.tabName && m.hasSlots)
       );
+      let candidate = null;
+      if (eligible.length > 0) {
+        if (TEACHER_PRIORITY_CONFIG[teacher.teacherName]) {
+          candidate = eligible.reduce((best, r) => {
+            const mt = r.matches.find(m => m.teacher.tabName === teacher.tabName && m.hasSlots);
+            const bestMt = best.matches.find(m => m.teacher.tabName === teacher.tabName && m.hasSlots);
+            return (mt.bestPriorityRank ?? 0) < (bestMt.bestPriorityRank ?? 0) ? r : best;
+          }, eligible[0]);
+        } else {
+          candidate = eligible[0];
+        }
+      }
       if (candidate) {
         used.add(candidate.member.cas);
         perTeacher[teacher.tabName].picked.push(candidate);
@@ -1519,13 +1755,50 @@ function randomAssign() {
   let html = hasLimit
     ? `<div class='section-title'>🎲 임의 배정 결과 (교사당 최대 ${n}명, 부족하면 고루 배정)</div>`
     : `<div class='section-title'>🎲 임의 배정 결과 (인원수 미입력 - 가능한 회원 전체를 고루 배정)</div>`;
-  html += `<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">🔶 표시는 마감임박(7/8) 자리를 채우는 우선 배정 회원입니다.</div>`;
+  html += `<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">🔶 표시는 마감임박(7/8) 자리를 채우는 우선 배정 회원, ⚡ 표시는 특이사항에 "빠른"이 있어 우선 배정된 회원, 👥 표시는 같은 레벨끼리 한 시간대로 모아 배정된 회원입니다. '추천 시간'은 그룹으로 모인 경우 그 공통 시간대, 그 외에는 해당 회원의 1순위 추천 시간입니다.</div>`;
   Object.values(perTeacher).forEach(({ teacher, picked }) => {
     if (picked.length === 0) return;
+
+    // 0.7단계에서 같은 시간대로 묶인 회원들을 모아 요약 표시
+    let recSummaryHtml = '';
+    const groupedByRec = new Map(); // "day-time" -> { slot, members, lv }
+    picked.forEach(r => {
+      if (!r._groupRec) return;
+      const key = `${r._groupRec.day}-${r._groupRec.time}${r._groupRec.assignedWeek||''}`;
+      if (!groupedByRec.has(key)) groupedByRec.set(key, { slot: r._groupRec, members: [], lv: r.member.level || '' });
+      groupedByRec.get(key).members.push(r);
+    });
+    groupedByRec.forEach(({ slot, members, lv }) => {
+      recSummaryHtml += `<div style="font-size:12px;margin:2px 0 2px 4px">📌 추천 시간: 레벨${lv} ${members.length}명 → `
+        + `<b>${formatSlot(slot)}</b> (현재 ${slot.currentCount}/8, 배정 후 ${slot.currentCount + members.length}/8) `
+        + `— 👥 한 시간대로 모아서 배정`
+        + `</div>`;
+    });
+
+    // 0.7단계에서 묶이지 않은 회원 중, 같은 레벨이 2명 이상이면 기존 방식으로 추천 시간 계산 (보조)
+    const groupRecMap = new Map(); // cas -> recommended slot
+    const remaining = picked.filter(r => !r._groupRec);
+    const levelGroups = {};
+    remaining.forEach(r => {
+      const lv = r.member.level || '';
+      (levelGroups[lv] = levelGroups[lv] || []).push(r);
+    });
+    Object.entries(levelGroups).forEach(([lv, members]) => {
+      if (members.length < 2) return;
+      const rec = getGroupRecommendedSlot(teacher, members, lv);
+      if (!rec) return;
+      members.forEach(r => groupRecMap.set(r.member.cas, rec));
+      recSummaryHtml += `<div style="font-size:12px;margin:2px 0 2px 4px">📌 추천 시간: 레벨${lv} ${members.length}명 → `
+        + `<b>${formatSlot(rec)}</b> (현재 ${rec.currentCount}/8, 배정 후 ${rec.currentCount + members.length}/8) `
+        + `— 한 시간대로 모아서 배정 가능`
+        + `</div>`;
+    });
+
     html += `<div class='random-teacher-block'>`
       + `<div class='random-teacher-name'>👩‍🏫 ${teacher.teacherName} — ${picked.length}명 배정</div>`
+      + recSummaryHtml
       + '<div style="overflow-x:auto"><table style="font-size:12px;width:auto">'
-      + `<thead><tr><th>#</th><th>CAS</th><th>레벨</th><th>수업주차</th>${currentMode === 'genN' ? '<th>코칭주기/배정주차</th>' : ''}<th>가능 일정(수기_AJ열)</th><th>불가능시간(설문 답변)</th><th>교사 가능시간</th><th>특이사항</th><th>형제</th></tr></thead><tbody>`;
+      + `<thead><tr><th>#</th><th>CAS</th><th>레벨</th><th>수업주차</th>${currentMode === 'genN' ? '<th>코칭주기/배정주차</th>' : ''}<th>가능 일정(수기_AJ열)</th><th>불가능시간(설문 답변)</th><th>교사 가능시간</th><th>추천 시간</th><th>특이사항</th><th>형제</th></tr></thead><tbody>`;
     picked.forEach((r, i) => {
       const m = r.member;
       const mt = r.matches.find(mt2 => mt2.teacher.tabName === teacher.tabName && mt2.hasSlots);
@@ -1538,13 +1811,20 @@ function randomAssign() {
         cycleCell = `<td style="width:70px">${m.isBiweekly ? `격주(N)${week ? ` / ${week}` : ''}` : '매주'}</td>`;
       }
       const exactFitTag = r._exactFitPicked ? ` <span class="badge badge-yellow">🔶마감임박</span>` : '';
-      html += `<tr><td>${i+1}</td><td><code>${m.cas}</code>${exactFitTag}</td>`
+      const urgentTag = r._urgentPicked ? ` <span class="badge badge-red">⚡빠른</span>` : '';
+      const groupTag = r._groupRec ? ` <span class="badge badge-orange">👥그룹</span>` : '';
+      // 추천 시간: 0.7단계 그룹 추천 > 보조 그룹 추천 > 개별 1순위 추천 슬롯
+      const rec = r._groupRec || groupRecMap.get(m.cas) || (mt && mt.availableSlots[0]) || null;
+      const recStr = rec ? formatSlot(rec) : '-';
+      const recHighlight = (r._groupRec || groupRecMap.get(m.cas)) ? ';font-weight:600;color:var(--orange)' : '';
+      html += `<tr><td>${i+1}</td><td><code>${m.cas}</code>${exactFitTag}${urgentTag}${groupTag}</td>`
         + `<td style="width:70px">${m.level||'-'}</td>`
         + `<td style="white-space:nowrap;font-size:12px">${firstWeekCell(m)}</td>`
         + cycleCell
         + `<td style="max-width:150px;font-size:12px">${m.possibleScheduleRaw||'-'}</td>`
         + `<td style="max-width:260px;font-size:12px;white-space:pre-line">${m.unavailDisplay||'-'}</td>`
         + `<td style="font-size:12px;white-space:nowrap">${slotStr||'-'}</td>`
+        + `<td style="font-size:12px;white-space:nowrap${recHighlight}">${recStr}</td>`
         + `<td style="max-width:220px;font-size:12px">${m.note||'-'}</td>`
         + `<td>${getBroHtml(m)}</td></tr>`;
     });
@@ -1582,7 +1862,6 @@ function switchTab(panelId, btn) {
   btn.classList.add('active');
 }
 
-// ========== 엑셀 다운로드 ==========
 function downloadExcel() {
   const wb = XLSX.utils.book_new();
   const guidelines = document.getElementById('guidelines').value.trim();
@@ -1685,23 +1964,47 @@ function downloadExcel() {
   if (lastRandomAssign) {
     const raHeader = [
       '교사','순번','CAS회원번호','레벨','수업주차', ...(isGenN ? ['코칭주기/배정주차'] : []),
-      '가능 일정(수기_AJ열)','불가능시간(설문 답변)','교사 가능시간','마감임박',
+      '가능 일정(수기_AJ열)','불가능시간(설문 답변)','교사 가능시간','추천 시간(그룹)','마감임박','빠른배정','그룹배정',
       '특이사항','형제정보'
     ];
     const raRows = [];
     const raExactFit = [];
+    const raUrgent = [];
+    const raGroup = [];
     Object.values(lastRandomAssign.perTeacher).forEach(({ teacher, picked }) => {
+      // 0.7단계에서 묶이지 않은 회원 중, 같은 레벨이 2명 이상이면 기존 방식으로 추천 시간 계산 (보조)
+      const groupRecMap = new Map(); // cas -> recommended slot
+      const remaining = picked.filter(r => !r._groupRec);
+      const levelGroups = {};
+      remaining.forEach(r => {
+        const lv = r.member.level || '';
+        (levelGroups[lv] = levelGroups[lv] || []).push(r);
+      });
+      Object.entries(levelGroups).forEach(([lv, members]) => {
+        if (members.length < 2) return;
+        const rec = getGroupRecommendedSlot(teacher, members, lv);
+        if (!rec) return;
+        members.forEach(r => groupRecMap.set(r.member.cas, rec));
+      });
+
       picked.forEach((r, i) => {
         const m = r.member;
         const mt = r.matches.find(mt2 => mt2.teacher.tabName === teacher.tabName && mt2.hasSlots);
         const slotStr = mt ? mt.availableSlots.slice(0,3).map(s=>`${s.day} ${s.time}`).join(', ') : '';
         const week = mt && mt.availableSlots[0] ? mt.availableSlots[0].assignedWeek : null;
         const isExactFit = !!r._exactFitPicked;
+        const isUrgent = !!r._urgentPicked;
+        const isGroup = !!r._groupRec;
+        // 추천 시간: 0.7단계 그룹 추천 > 보조 그룹 추천 > 개별 1순위 추천 슬롯
+        const rec = r._groupRec || groupRecMap.get(m.cas) || (mt && mt.availableSlots[0]) || null;
+        const recStr = rec ? formatSlot(rec) : '';
         raExactFit.push(isExactFit);
+        raUrgent.push(isUrgent);
+        raGroup.push(isGroup);
         raRows.push([
           teacher.teacherName, i+1, m.cas, m.level, firstWeekCell(m),
           ...(isGenN ? [m.isBiweekly ? `격주(N)${week ? ` / ${week}` : ''}` : '매주'] : []),
-          m.possibleScheduleRaw, m.unavailDisplay, slotStr, isExactFit ? 'O' : '',
+          m.possibleScheduleRaw, m.unavailDisplay, slotStr, recStr, isExactFit ? 'O' : '', isUrgent ? 'O' : '', isGroup ? 'O' : '',
           m.note, getBroStr(m)
         ]);
       });
@@ -1715,6 +2018,22 @@ function downloadExcel() {
       raHeader.forEach((_, c) => {
         const addr = XLSX.utils.encode_cell({ r: rIdx + 1, c });
         if (wsRandom[addr]) wsRandom[addr].s = XLSX_YELLOW_FILL;
+      });
+    });
+    // 특이사항 "빠른" 우선 배정 행 빨간색 강조 (마감임박과 중복 시 마감임박색 유지)
+    raUrgent.forEach((isUrgent, rIdx) => {
+      if (!isUrgent || raExactFit[rIdx]) return;
+      raHeader.forEach((_, c) => {
+        const addr = XLSX.utils.encode_cell({ r: rIdx + 1, c });
+        if (wsRandom[addr]) wsRandom[addr].s = XLSX_RED_FILL;
+      });
+    });
+    // 같은 레벨끼리 한 시간대로 모아 배정된(그룹배정) 행 주황색 강조 (마감임박/빠른배정과 중복 시 해당 색 우선)
+    raGroup.forEach((isGroup, rIdx) => {
+      if (!isGroup || raExactFit[rIdx] || raUrgent[rIdx]) return;
+      raHeader.forEach((_, c) => {
+        const addr = XLSX.utils.encode_cell({ r: rIdx + 1, c });
+        if (wsRandom[addr]) wsRandom[addr].s = XLSX_ORANGE_FILL;
       });
     });
     XLSX.utils.book_append_sheet(wb, wsRandom, '임의배정결과');
@@ -1810,3 +2129,4 @@ function downloadExcel() {
 </script>
 </body>
 </html>
+
