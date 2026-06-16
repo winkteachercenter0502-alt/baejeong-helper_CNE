@@ -186,7 +186,7 @@
   <div class="card">
     <div class="action-bar">
       <button class="btn btn-primary" id="btnProcess" onclick="processFiles()" disabled>🔍 비교 시작</button>
-      <button class="btn btn-secondary" onclick="randomAssign()" style="margin-left:8px">🎲 임의 배정</button>
+      <button class="btn btn-primary" id="btnRandom" onclick="randomAssign()" style="margin-left:8px">🎲 임의 배정</button>
       <button class="btn btn-gray" onclick="resetAll()">↺ 초기화</button>
       <span id="processStatus" style="font-size:13px;color:var(--text-muted)">파일 2개를 모두 업로드하면 활성화됩니다.</span>
     </div>
@@ -236,8 +236,9 @@
 
       <!-- 교사별 탭 -->
       <div class="tab-panel" id="tabByTeacher">
-        <div id="randomAssignResult" class="random-section" style="display:none;margin-bottom:16px"></div>
+        <div id="randomAssignBanner" style="display:none;margin-bottom:8px"></div>
         <div id="teacherPanels"></div>
+        <div id="randomAssignUnassigned" style="display:none;margin-top:12px"></div>
       </div>
     </div>
 
@@ -581,8 +582,10 @@ function resetAll() {
   document.getElementById('processStatus').style.color = '';
   document.getElementById('resultsArea').style.display = 'none';
   document.getElementById('guidelines').value = '';
-  const raEl = document.getElementById('randomAssignResult');
-  if (raEl) { raEl.innerHTML = ''; raEl.style.display = 'none'; }
+  const bannerEl = document.getElementById('randomAssignBanner');
+  if (bannerEl) { bannerEl.innerHTML = ''; bannerEl.style.display = 'none'; }
+  const unassignedEl2 = document.getElementById('randomAssignUnassigned');
+  if (unassignedEl2) { unassignedEl2.innerHTML = ''; unassignedEl2.style.display = 'none'; }
 }
 
 // ========== 유틸 ==========
@@ -1115,34 +1118,46 @@ function parseSchedulerFile(wb) {
       return;
     }
 
-    // 회원 목록 (행11 = index 10부터)
+    // 회원 목록: 컬럼 레이아웃 자동 감지
+    // - CN1형(C열CAS/G열요일/H열시간, row9+): parseTeacherTabGenN과 동일한 포맷
+    // - 구형(D열CAS/I열요일/J열시간, row11+): 기존 포맷
     const slotCount = {}; // key: "요일-시간" → count
     const membersInTab = [];
     const isEng = currentMode === 'eng' || currentMode === 'engJj';
 
-    for (let i = 10; i < aoa.length; i++) {
+    // 자동 감지: row 8~12 중 G열(idx6)에 DAYS_ORDER 값이 있으면 CN1형
+    const detectRows = aoa.slice(8, 13).filter(r => r);
+    const isCN1 = detectRows.some(r => r && DAYS_ORDER.includes(safeStr(r[6])));
+    const startRow = isCN1 ? 8 : 10;
+    const casCOL = isCN1 ? 2 : 3;   // C열 or D열
+    const dayCOL  = isCN1 ? 6 : 8;  // G열 or I열
+    const timeCOL = isCN1 ? 7 : 9;  // H열 or J열
+    const nameCOL = isCN1 ? 3 : 4;  // D열 or E열
+    const lvCOL   = isCN1 ? 4 : 7;  // E열(학년/레벨) or H열(영어레벨)
+
+    for (let i = startRow; i < aoa.length; i++) {
       const row = aoa[i];
       if (!row) continue;
-      const cas = safeStr(row[3]); // D열: 회원번호
+      const cas = safeStr(row[casCOL]);
       if (!cas || isNaN(parseInt(cas))) continue;
 
-      const day = safeStr(row[8]);   // I열: 요일
-      const time = parseTime(row[9]); // J열: 시간
+      const day  = safeStr(row[dayCOL]);
+      const time = parseTime(row[timeCOL]);
 
       if (day && DAYS_ORDER.includes(day) && time) {
         const key = `${day}-${time}`;
         slotCount[key] = (slotCount[key] || 0) + 1;
       }
 
-      // 영어=레벨(H열 index7), 일반=학년(G열 index6)
-      const memberLevel = isEng ? safeStr(row[7]) : (() => {
-        const gr = safeStr(row[6]);
-        const gm = gr.match(/(\d+)/);
-        return gm ? gm[1] : gr;
+      // 레벨/학년
+      const memberLevel = (() => {
+        const raw = safeStr(row[lvCOL]);
+        const gm = raw.match(/(\d+)/);
+        return gm ? gm[1] : raw;
       })();
 
       membersInTab.push({
-        cas, name: safeStr(row[4]),
+        cas, name: safeStr(row[nameCOL]),
         level: memberLevel, day, time
       });
     }
@@ -1312,8 +1327,10 @@ async function processFiles() {
 
   // 새로 비교를 실행하면 이전 임의 배정 결과는 초기화
   lastRandomAssign = null;
-  const raEl = document.getElementById('randomAssignResult');
-  if (raEl) { raEl.innerHTML = ''; raEl.style.display = 'none'; }
+  const bannerEl = document.getElementById('randomAssignBanner');
+  if (bannerEl) { bannerEl.innerHTML = ''; bannerEl.style.display = 'none'; }
+  const unassignedEl2 = document.getElementById('randomAssignUnassigned');
+  if (unassignedEl2) { unassignedEl2.innerHTML = ''; unassignedEl2.style.display = 'none'; }
 
   try {
     document.getElementById('processStatus').textContent = '⏳ 배정 회원 분석 중...';
@@ -1539,6 +1556,11 @@ function renderEarlyMembers() {
   el.innerHTML = html;
 }
 
+// 교사 tabName → 임의배정 결과 플레이스홀더 DOM id
+function safeTeacherId(tabName) {
+  return 'rr_' + String(tabName).replace(/[^a-zA-Z0-9]/g, '_');
+}
+
 function renderTeacherPanels() {
   let html = '';
 
@@ -1552,7 +1574,7 @@ function renderTeacherPanels() {
       ? teacher.levels.map(l => `<span class="badge badge-yellow">Lv${l}</span>`).join(' ')
       : '<span class="badge badge-gray">레벨 미확인</span>';
 
-    // 가능 시간대 표 (8명 미만 슬롯만)
+    // 가능 시간대 표 (8명 미만 슬롯만, 0명=전원가능 포함)
     const availSlots = teacher.availableSlots.filter(s => s.available);
     const slotsByDay = {};
     availSlots.forEach(s => {
@@ -1645,6 +1667,8 @@ function renderTeacherPanels() {
           </table>
         </div>
       </details>
+      <!-- 임의 배정 결과가 여기에 주입됨 (_doRandomAssign) -->
+      <div id="${safeTeacherId(teacher.tabName)}" style="display:none;margin-top:10px"></div>
     </div>
     <hr style="border:none;border-top:1px solid var(--gray-border);margin:12px 0">`;
   });
@@ -1657,6 +1681,14 @@ function randomAssign() {
   if (!matchResults || matchResults.length === 0) {
     alert('먼저 비교를 실행하세요.'); return;
   }
+  // 버튼 비활성화(깜빡 효과) → 비교 시작 버튼과 동일한 시각적 피드백
+  const btnRandom = document.getElementById('btnRandom');
+  if (btnRandom) btnRandom.disabled = true;
+  setTimeout(() => _doRandomAssign(), 50);
+}
+function _doRandomAssign() {
+  const btnRandom = document.getElementById('btnRandom');
+  try {
   // 인원수를 입력하지 않으면 상한 없이(가능한 만큼) 끝까지 고루 배정,
   // 입력하면 교사당 최대 n명까지 배정 (회원이 충분한 교사는 n명 그대로,
   // 부족한 교사는 가능한 만큼만 배정되어 자연히 고루 분배됨)
@@ -1852,15 +1884,20 @@ function randomAssign() {
   // 엑셀 다운로드용으로 결과 저장
   lastRandomAssign = { n: hasLimit ? n : null, perTeacher, unassigned };
 
-  // 렌더링
-  const el = document.getElementById('randomAssignResult');
-  if (!el) return;
-  let html = hasLimit
-    ? `<div class='section-title'>🎲 임의 배정 결과 (교사당 최대 ${n}명, 부족하면 고루 배정)</div>`
-    : `<div class='section-title'>🎲 임의 배정 결과 (인원수 미입력 - 가능한 회원 전체를 고루 배정)</div>`;
-  html += `<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">🔶 표시는 마감임박(7/8) 자리를 채우는 우선 배정 회원, ⚡ 표시는 특이사항에 "빠른"이 있어 우선 배정된 회원, 👥 표시는 같은 레벨끼리 한 시간대로 모아 배정된 회원입니다. '추천 시간'은 그룹으로 모인 경우 그 공통 시간대, 그 외에는 해당 회원의 1순위 추천 시간입니다.</div>`;
+  // 렌더링: 교사별 플레이스홀더에 직접 주입 (교사 블록 안에 통합 표시)
+  const banner = document.getElementById('randomAssignBanner');
+  if (banner) {
+    const title = hasLimit
+      ? `🎲 임의 배정 결과 (교사당 최대 ${n}명, 부족하면 고루 배정)`
+      : `🎲 임의 배정 결과 (인원수 미입력 - 가능한 회원 전체를 고루 배정)`;
+    banner.innerHTML = `<div class='section-title' style='margin-bottom:4px'>${title}</div>`
+      + `<div style="font-size:12px;color:var(--text-muted)">🔶 마감임박(7/8) 우선 배정 · ⚡ "빠른" 우선 배정 · 👥 같은 레벨 그룹 배정. 추천 시간: 그룹 공통 시간대 또는 1순위 슬롯.</div>`;
+    banner.style.display = 'block';
+  }
   Object.values(perTeacher).forEach(({ teacher, picked }) => {
-    if (picked.length === 0) return;
+    const slot = document.getElementById(safeTeacherId(teacher.tabName));
+    if (!slot) return;
+    if (picked.length === 0) { slot.style.display = 'none'; slot.innerHTML = ''; return; }
 
     // 0.7단계에서 같은 시간대로 묶인 회원들을 모아 요약 표시
     let recSummaryHtml = '';
@@ -1911,8 +1948,8 @@ function randomAssign() {
       }
     });
 
-    html += `<div class='random-teacher-block'>`
-      + `<div class='random-teacher-name'>👩‍🏫 ${teacher.teacherName} — ${picked.length}명 배정</div>`
+    let tHtml = `<div class='random-teacher-block'>`
+      + `<div class='random-teacher-name' style='font-size:13px;margin-bottom:4px'>🎲 임의 배정 결과 — ${picked.length}명</div>`
       + recSummaryHtml
       + '<div style="overflow-x:auto"><table style="font-size:12px;width:auto">'
       + `<thead><tr><th>#</th><th>CAS</th><th>레벨</th><th>수업주차</th>${currentMode === 'genN' ? '<th>코칭주기/배정주차</th>' : ''}<th>가능 일정(수기_AJ열)</th><th>불가능시간(설문 답변)</th><th>교사 가능시간</th><th>추천 시간</th><th>특이사항</th><th>형제</th></tr></thead><tbody>`;
@@ -1934,7 +1971,7 @@ function randomAssign() {
       const rec = r._groupRec || groupRecMap.get(m.cas) || (mt && mt.availableSlots[0]) || null;
       const recStr = rec ? formatSlot(rec) : '-';
       const recHighlight = (r._groupRec || groupRecMap.get(m.cas)) ? ';font-weight:600;color:var(--orange)' : '';
-      html += `<tr><td>${i+1}</td><td><code>${m.cas}</code>${exactFitTag}${urgentTag}${groupTag}</td>`
+      tHtml += `<tr><td>${i+1}</td><td><code>${m.cas}</code>${exactFitTag}${urgentTag}${groupTag}</td>`
         + `<td style="width:70px">${m.level||'-'}</td>`
         + `<td style="white-space:nowrap;font-size:12px">${firstWeekCell(m)}</td>`
         + cycleCell
@@ -1945,30 +1982,41 @@ function randomAssign() {
         + `<td style="max-width:220px;font-size:12px">${m.note||'-'}</td>`
         + `<td>${getBroHtml(m)}</td></tr>`;
     });
-    html += '</tbody></table></div></div>';
+    tHtml += '</tbody></table></div></div>';
+    slot.innerHTML = tHtml;
+    slot.style.display = 'block';
   });
 
-  // 미배정 회원 목록
-  if (unassigned.length > 0) {
-    html += `<div class='section-title' style='margin-top:16px'>⚠️ 미배정 회원 (${unassigned.length}명)</div>`;
-    html += '<div style="overflow-x:auto"><table style="font-size:12px;width:auto">'
-      + '<thead><tr><th>#</th><th>CAS</th><th>레벨</th><th>수업주차</th><th>가능 일정(수기_AJ열)</th><th>불가능시간(설문 답변)</th><th>특이사항</th><th>형제</th></tr></thead><tbody>';
-    unassigned.forEach((r, i) => {
-      const m = r.member;
-      html += `<tr><td>${i+1}</td><td><code>${m.cas}</code></td>`
-        + `<td style="width:70px">${m.level||'-'}</td>`
-        + `<td style="white-space:nowrap;font-size:12px">${firstWeekCell(m)}</td>`
-        + `<td style="max-width:150px;font-size:12px">${m.possibleScheduleRaw||'-'}</td>`
-        + `<td style="max-width:260px;font-size:12px;white-space:pre-line">${m.unavailDisplay||'-'}</td>`
-        + `<td style="max-width:220px;font-size:12px">${m.note||'-'}</td>`
-        + `<td>${getBroHtml(m)}</td></tr>`;
-    });
-    html += '</tbody></table></div>';
+  // 미배정 회원 목록 (교사 블록 아래 별도 영역)
+  const unassignedEl = document.getElementById('randomAssignUnassigned');
+  if (unassignedEl) {
+    if (unassigned.length > 0) {
+      let uHtml = `<div class='section-title'>⚠️ 미배정 회원 (${unassigned.length}명)</div>`;
+      uHtml += '<div style="overflow-x:auto"><table style="font-size:12px;width:auto">'
+        + '<thead><tr><th>#</th><th>CAS</th><th>레벨</th><th>수업주차</th><th>가능 일정(수기_AJ열)</th><th>불가능시간(설문 답변)</th><th>특이사항</th><th>형제</th></tr></thead><tbody>';
+      unassigned.forEach((r, i) => {
+        const m = r.member;
+        uHtml += `<tr><td>${i+1}</td><td><code>${m.cas}</code></td>`
+          + `<td style="width:70px">${m.level||'-'}</td>`
+          + `<td style="white-space:nowrap;font-size:12px">${firstWeekCell(m)}</td>`
+          + `<td style="max-width:150px;font-size:12px">${m.possibleScheduleRaw||'-'}</td>`
+          + `<td style="max-width:260px;font-size:12px;white-space:pre-line">${m.unavailDisplay||'-'}</td>`
+          + `<td style="max-width:220px;font-size:12px">${m.note||'-'}</td>`
+          + `<td>${getBroHtml(m)}</td></tr>`;
+      });
+      uHtml += '</tbody></table></div>';
+      unassignedEl.innerHTML = uHtml;
+      unassignedEl.style.display = 'block';
+    } else {
+      unassignedEl.innerHTML = '';
+      unassignedEl.style.display = 'none';
+    }
   }
 
-  el.innerHTML = html;
-  el.style.display = 'block';
-  el.scrollIntoView({ behavior:'smooth' });
+  document.getElementById('teacherPanels').scrollIntoView({ behavior:'smooth' });
+  } finally {
+    if (btnRandom) btnRandom.disabled = false;
+  }
 }
 
 // ========== 탭 전환 ==========
