@@ -1814,7 +1814,12 @@ function randomAssign() {
 
   for (let round = 0; round < n; round++) {
     let progress = false;
-    shuffledTeachers.forEach(teacher => {
+    // 매 라운드마다 현재 배정 인원이 적은 교사를 먼저 처리 → 회원이 부족할 때도 고루 배정
+    // (순서 고정 시: 앞쪽 교사가 공유 가능 회원을 먼저 가져가 뒷 교사에게 부족해지는 문제 방지)
+    const roundTeachers = shuffledTeachers.slice().sort(
+      (a, b) => perTeacher[a.tabName].picked.length - perTeacher[b.tabName].picked.length
+    );
+    roundTeachers.forEach(teacher => {
       if (perTeacher[teacher.tabName].picked.length >= n) return;
       // 4교사 우선순위 규칙: 같은 후보 중 우선순위 점수(bestPriorityRank)가 낮은(=우선 시간대) 회원을 먼저 배정
       const eligible = shuffledMembers.filter(r =>
@@ -2151,13 +2156,24 @@ function downloadExcel() {
     XLSX.utils.book_append_sheet(wb, wsRandom, '임의배정결과');
 
     // 미배정 회원
+    // 미배정 사유 계산: 매칭 교사/시간 없음 | 교사 정원 초과 | 기타(인원 경쟁으로 미배정)
+    const effectiveN = lastRandomAssign.n ?? Infinity;
+    const getUnassignedReason = (r) => {
+      const matchingTeachers = r.matches.filter(m => m.hasSlots);
+      if (matchingTeachers.length === 0) return '매칭 교사/시간 없음';
+      const allFull = matchingTeachers.every(m =>
+        (lastRandomAssign.perTeacher[m.teacher.tabName]?.picked.length ?? 0) >= effectiveN
+      );
+      if (allFull) return '교사 정원 초과';
+      return '기타 (인원 경쟁으로 미배정)';
+    };
     const unHeader = [
       '순번','CAS회원번호','학년','레벨','수업주차', ...(isGenN ? ['코칭주기'] : []),
-      '가능 일정(수기_AJ열)','불가능시간(설문 답변)','특이사항','형제정보'
+      '미배정 사유','가능 일정(수기_AJ열)','불가능시간(설문 답변)','특이사항','형제정보'
     ];
     const unRows = lastRandomAssign.unassigned.map((r, i) => {
       const m = r.member;
-      return [i+1, m.cas, gradeCell(m), m.level, firstWeekCell(m), ...(isGenN ? [m.isBiweekly ? '격주(N)' : '매주'] : []), m.possibleScheduleRaw, m.unavailDisplay, m.note, getBroStr(m)];
+      return [i+1, m.cas, gradeCell(m), m.level, firstWeekCell(m), ...(isGenN ? [m.isBiweekly ? '격주(N)' : '매주'] : []), getUnassignedReason(r), m.possibleScheduleRaw, m.unavailDisplay, m.note, getBroStr(m)];
     });
     if (unRows.length === 0) unRows.push(['미배정 회원 없음']);
     const wsUnassigned = XLSX.utils.aoa_to_sheet([unHeader, ...unRows]);
