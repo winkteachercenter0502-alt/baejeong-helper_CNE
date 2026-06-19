@@ -768,6 +768,43 @@ function getBlockedSlots(row) {
   return blocked;
 }
 
+// AJ열(가능일정 수기) 자유텍스트에서 시간 조건을 파싱해 blockedSlots를 반환
+// - "X시이후", "X시부터", "X시30분이후" → X시(30분) 미만 슬롯 차단
+// - "X시까지", "X시30분까지" → X시(30분) 초과 슬롯 차단
+// - 시간 조건이 없으면 null 반환 (AQ~AV fallback)
+function getAjTimeBlocked(ajRaw) {
+  if (!ajRaw) return null;
+  const s = String(ajRaw).replace(/\s+/g, '');
+  let minMinutes = null, maxMinutes = null;
+
+  // 이후/부터: "5시이후", "5시30분이후", "5시반이후"
+  const afterM = s.match(/(\d+)시(30분?|반)?(이후|부터)/);
+  if (afterM) {
+    const hour = parseInt(afterM[1]);
+    const hasHalf = !!(afterM[2]);
+    minMinutes = hour * 60 + (hasHalf ? 30 : 0);
+  }
+
+  // 까지: "7시까지", "7시30분까지"
+  const untilM = s.match(/(\d+)시(30분?|반)?까지/);
+  if (untilM) {
+    const hour = parseInt(untilM[1]);
+    const hasHalf = !!(untilM[2]);
+    maxMinutes = hour * 60 + (hasHalf ? 30 : 0);
+  }
+
+  if (minMinutes === null && maxMinutes === null) return null;
+
+  const blocked = new Set();
+  TIME_SLOTS.forEach(t => {
+    const [h, m] = t.split(':').map(Number);
+    const tm = h * 60 + m;
+    if (minMinutes !== null && tm < minMinutes) blocked.add(t);
+    if (maxMinutes !== null && tm > maxMinutes) blocked.add(t);
+  });
+  return blocked;
+}
+
 // 30분 더한 시간 문자열 반환 (예: "8:30" → "9:00")
 function addHalfHour(t) {
   const [h, m] = t.split(':').map(Number);
@@ -941,8 +978,14 @@ function parseAssignmentFile(wb) {
     // 요일 정보가 전혀 없으면 제외 (팀명, 공란 등) - 화상코칭거부/요일 전체불가는 유지
     if (!videoRefused && possibleDays.length === 0 && !dayRestricted) continue;
 
-    // 불가 시간 (AQ~AV) → 가능 시간대로 변환
-    const blockedSlots = videoRefused ? new Set() : getBlockedSlots(row);
+    // 불가 시간: AJ에 시간 조건(이후/부터/까지) 있으면 AJ 우선, 없으면 AQ~AV 설문 기준
+    let blockedSlots;
+    if (videoRefused) {
+      blockedSlots = new Set();
+    } else {
+      const ajTimeBlocked = getAjTimeBlocked(_ajRaw);
+      blockedSlots = ajTimeBlocked !== null ? ajTimeBlocked : getBlockedSlots(row);
+    }
     const availTimeDisplay = videoRefused ? '' : getAvailableTimesDisplay(blockedSlots);
     const requestStr = safeStr(row[COL.AW_REQUEST]);
 
