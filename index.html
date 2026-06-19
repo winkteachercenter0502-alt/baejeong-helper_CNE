@@ -643,6 +643,15 @@ function singleCourseCell(m) {
   if (/^[1-3]년/.test(rest)) return '단과';
   return '';
 }
+// 관리 대상 여부: 캐츠잉글리시 단과 상품 OR (알파벳 레벨+예비초) OR 6학년
+function isKanri(m) {
+  if (singleCourseCell(m) === '단과') return true;
+  const grade = (m.grade || '');
+  const level = (m.level || '');
+  if (level && isNaN(parseInt(level)) && grade.includes('예비초')) return true;
+  if (grade.includes('6학년') || grade === '6' || String(level) === '6') return true;
+  return false;
+}
 // 배정 불가 회원 여부: 매칭되는 가능 슬롯(hasSlots)이 전혀 없는 경우
 function isUnassignable(r) {
   return !r.matches.some(mt => mt.hasSlots);
@@ -1125,15 +1134,48 @@ function parseSchedulerFile(wb) {
     const membersInTab = [];
     const isEng = currentMode === 'eng' || currentMode === 'engJj';
 
-    // 자동 감지: row 8~12 중 G열(idx6)에 DAYS_ORDER 값이 있으면 CN1형
-    const detectRows = aoa.slice(8, 13).filter(r => r);
-    const isCN1 = detectRows.some(r => r && DAYS_ORDER.includes(safeStr(r[6])));
-    const startRow = isCN1 ? 8 : 10;
-    const casCOL = isCN1 ? 2 : 3;   // C열 or D열
-    const dayCOL  = isCN1 ? 6 : 8;  // G열 or I열
-    const timeCOL = isCN1 ? 7 : 9;  // H열 or J열
-    const nameCOL = isCN1 ? 3 : 4;  // D열 or E열
-    const lvCOL   = isCN1 ? 4 : 7;  // E열(학년/레벨) or H열(영어레벨)
+    // 컬럼 레이아웃 자동 감지 (더 넓은 범위 탐색)
+    let startRow, casCOL, dayCOL, timeCOL, nameCOL, lvCOL;
+    let _fmtOk = false;
+    const _limit = Math.min(aoa.length, 30);
+    // 1) CN1형: G열(idx6) rows 4~20
+    for (let _si = 4; _si < _limit && !_fmtOk; _si++) {
+      const _r = aoa[_si];
+      if (_r && DAYS_ORDER.includes(safeStr(_r[6]))) {
+        casCOL = 2; dayCOL = 6; timeCOL = 7; nameCOL = 3; lvCOL = 4;
+        startRow = _si; _fmtOk = true;
+      }
+    }
+    // 2) 구형: I열(idx8) rows 6~20
+    for (let _si = 6; _si < _limit && !_fmtOk; _si++) {
+      const _r = aoa[_si];
+      if (_r && DAYS_ORDER.includes(safeStr(_r[8]))) {
+        casCOL = 3; dayCOL = 8; timeCOL = 9; nameCOL = 4; lvCOL = 7;
+        startRow = _si; _fmtOk = true;
+      }
+    }
+    // 3) 기타: 임의 열 동적 탐색 (어느 열에 2개 이상 연속 요일값 있으면 그 열)
+    if (!_fmtOk) {
+      _outer: for (let _si = 3; _si < _limit; _si++) {
+        const _r = aoa[_si];
+        if (!_r) continue;
+        for (let _c = 2; _c < Math.min((_r.length||0), 14); _c++) {
+          if (!DAYS_ORDER.includes(safeStr(_r[_c]))) continue;
+          let _cnt = 0;
+          for (let _j = _si; _j < Math.min(_limit, _si+15); _j++) {
+            if (aoa[_j] && DAYS_ORDER.includes(safeStr(aoa[_j][_c]))) _cnt++;
+          }
+          if (_cnt >= 2) {
+            dayCOL = _c; timeCOL = _c+1;
+            casCOL = Math.max(2, _c-4); nameCOL = casCOL+1; lvCOL = casCOL+2;
+            startRow = _si; _fmtOk = true;
+            break _outer;
+          }
+        }
+      }
+    }
+    // fallback
+    if (!_fmtOk) { startRow = 10; casCOL = 3; dayCOL = 8; timeCOL = 9; nameCOL = 4; lvCOL = 7; }
 
     for (let i = startRow; i < aoa.length; i++) {
       const row = aoa[i];
@@ -1228,8 +1270,11 @@ function matchAll(members, teachers) {
         // 불가 시간 필터
         if (member.blockedSlots.has(slot.time)) return;
 
-        // 파닉스 전용 시간대 제한 (박현수/이현희A): 파닉스 레벨 학생은 지정된 (요일-시간) 슬롯만 매칭
-        if (prioCfg && prioCfg.phonicsSlots && levelStr === '파닉스' && !prioCfg.phonicsSlots.has(`${slot.day}-${slot.time}`)) return;
+        // 파닉스/알파벳 레벨(비숫자): phonicsSlots를 가진 교사(이현희A/박현수)에만 배정 + 지정 시간대만 허용
+        if (levelStr && isNaN(parseInt(levelStr))) {
+          if (!prioCfg || !prioCfg.phonicsSlots) return;
+          if (!prioCfg.phonicsSlots.has(`${slot.day}-${slot.time}`)) return;
+        }
 
         const key = `${teacher.tabName}-${slot.day}-${slot.time}`;
 
@@ -1635,9 +1680,9 @@ function renderTeacherPanels() {
         <summary>배정 가능 회원 (${assignable.length}명)</summary>
         <div>
           <table style="font-size:12px">
-            <thead><tr><th>#</th><th>CAS</th><th>레벨</th><th>수업주차</th>${currentMode === 'genN' ? '<th>코칭주기</th>' : ''}<th>가능 일정(수기_AJ열)</th><th>교사 가능시간</th><th>불가능시간(설문 답변)</th><th>특이사항</th><th>형제</th></tr></thead>
+            <thead><tr><th>#</th><th>CAS</th><th>레벨</th><th>수업주차</th>${currentMode === 'genN' ? '<th>코칭주기</th>' : ''}<th>관리</th><th>가능 일정(수기_AJ열)</th><th>교사 가능시간</th><th>불가능시간(설문 답변)</th><th>특이사항</th><th>형제</th></tr></thead>
             <tbody>
-              ${assignable.length === 0 ? `<tr><td colspan="${currentMode === 'genN' ? 10 : 9}" style="text-align:center;color:var(--text-muted)">해당 없음</td></tr>` :
+              ${assignable.length === 0 ? `<tr><td colspan="${currentMode === 'genN' ? 11 : 10}" style="text-align:center;color:var(--text-muted)">해당 없음</td></tr>` :
                 assignable.map((r, i) => {
                   const m = r.member;
                   const mt = r.matches.find(mt2 => mt2.teacher.tabName === teacher.tabName && mt2.hasSlots);
@@ -1655,6 +1700,7 @@ function renderTeacherPanels() {
                     <td><div style="width:58px">${m.level ? `<span class="badge badge-yellow">Lv${m.level}</span>` : '-'}</div></td>
                     <td style="white-space:nowrap;font-size:12px">${firstWeekCell(m)}</td>
                     ${cycleCell}
+                    <td style="width:40px;font-size:12px">${isKanri(m) ? '<span class="badge badge-red">관리</span>' : ''}</td>
                     <td style="max-width:150px">${m.possibleScheduleRaw || '-'}</td>
                     <td style="font-size:12px;white-space:nowrap">${slotStr || '-'}</td>
                     <td style="max-width:280px;white-space:pre-line">${m.unavailDisplay || '-'}</td>
@@ -1952,7 +1998,7 @@ function _doRandomAssign() {
       + `<div class='random-teacher-name' style='font-size:13px;margin-bottom:4px'>🎲 임의 배정 결과 — ${picked.length}명</div>`
       + recSummaryHtml
       + '<div style="overflow-x:auto"><table style="font-size:12px;width:auto">'
-      + `<thead><tr><th>#</th><th>CAS</th><th>레벨</th><th>수업주차</th>${currentMode === 'genN' ? '<th>코칭주기/배정주차</th>' : ''}<th>가능 일정(수기_AJ열)</th><th>불가능시간(설문 답변)</th><th>교사 가능시간</th><th>추천 시간</th><th>특이사항</th><th>형제</th></tr></thead><tbody>`;
+      + `<thead><tr><th>#</th><th>CAS</th><th>레벨</th><th>수업주차</th>${currentMode === 'genN' ? '<th>코칭주기/배정주차</th>' : ''}<th>관리</th><th>가능 일정(수기_AJ열)</th><th>불가능시간(설문 답변)</th><th>교사 가능시간</th><th>추천 시간</th><th>특이사항</th><th>형제</th></tr></thead><tbody>`;
     picked.forEach((r, i) => {
       const m = r.member;
       const mt = r.matches.find(mt2 => mt2.teacher.tabName === teacher.tabName && mt2.hasSlots);
@@ -1975,6 +2021,7 @@ function _doRandomAssign() {
         + `<td style="width:70px">${m.level||'-'}</td>`
         + `<td style="white-space:nowrap;font-size:12px">${firstWeekCell(m)}</td>`
         + cycleCell
+        + `<td style="width:40px;font-size:12px">${isKanri(m) ? '<span class="badge badge-red">관리</span>' : ''}</td>`
         + `<td style="max-width:150px;font-size:12px">${m.possibleScheduleRaw||'-'}</td>`
         + `<td style="max-width:260px;font-size:12px;white-space:pre-line">${m.unavailDisplay||'-'}</td>`
         + `<td style="font-size:12px;white-space:nowrap">${slotStr||'-'}</td>`
@@ -1993,12 +2040,13 @@ function _doRandomAssign() {
     if (unassigned.length > 0) {
       let uHtml = `<div class='section-title'>⚠️ 미배정 회원 (${unassigned.length}명)</div>`;
       uHtml += '<div style="overflow-x:auto"><table style="font-size:12px;width:auto">'
-        + '<thead><tr><th>#</th><th>CAS</th><th>레벨</th><th>수업주차</th><th>가능 일정(수기_AJ열)</th><th>불가능시간(설문 답변)</th><th>특이사항</th><th>형제</th></tr></thead><tbody>';
+        + '<thead><tr><th>#</th><th>CAS</th><th>레벨</th><th>수업주차</th><th>관리</th><th>가능 일정(수기_AJ열)</th><th>불가능시간(설문 답변)</th><th>특이사항</th><th>형제</th></tr></thead><tbody>';
       unassigned.forEach((r, i) => {
         const m = r.member;
         uHtml += `<tr><td>${i+1}</td><td><code>${m.cas}</code></td>`
           + `<td style="width:70px">${m.level||'-'}</td>`
           + `<td style="white-space:nowrap;font-size:12px">${firstWeekCell(m)}</td>`
+          + `<td style="width:40px;font-size:12px">${isKanri(m) ? '<span class="badge badge-red">관리</span>' : ''}</td>`
           + `<td style="max-width:150px;font-size:12px">${m.possibleScheduleRaw||'-'}</td>`
           + `<td style="max-width:260px;font-size:12px;white-space:pre-line">${m.unavailDisplay||'-'}</td>`
           + `<td style="max-width:220px;font-size:12px">${m.note||'-'}</td>`
@@ -2129,7 +2177,7 @@ function downloadExcel() {
   if (lastRandomAssign) {
     const raHeader = [
       '교사','순번','CAS회원번호','학년','레벨','수업주차', ...(isGenN ? ['코칭주기/배정주차'] : []),
-      '가능 일정(수기_AJ열)','불가능시간(설문 답변)','교사 가능시간','추천 시간(그룹)','마감임박','빠른배정','그룹배정',
+      '관리','가능 일정(수기_AJ열)','불가능시간(설문 답변)','교사 가능시간','추천 시간(그룹)','마감임박','빠른배정','그룹배정',
       '특이사항','형제정보'
     ];
     const raRows = [];
@@ -2169,6 +2217,7 @@ function downloadExcel() {
         raRows.push([
           teacher.teacherName, i+1, m.cas, gradeCell(m), m.level, firstWeekCell(m),
           ...(isGenN ? [m.isBiweekly ? `격주(N)${week ? ` / ${week}` : ''}` : '매주'] : []),
+          isKanri(m) ? '관리' : '',
           m.possibleScheduleRaw, m.unavailDisplay, slotStr, recStr, isExactFit ? 'O' : '', isUrgent ? 'O' : '', isGroup ? 'O' : '',
           m.note, getBroStr(m)
         ]);
@@ -2217,11 +2266,11 @@ function downloadExcel() {
     };
     const unHeader = [
       '순번','CAS회원번호','학년','레벨','수업주차', ...(isGenN ? ['코칭주기'] : []),
-      '미배정 사유','가능 일정(수기_AJ열)','불가능시간(설문 답변)','특이사항','형제정보'
+      '관리','미배정 사유','가능 일정(수기_AJ열)','불가능시간(설문 답변)','특이사항','형제정보'
     ];
     const unRows = lastRandomAssign.unassigned.map((r, i) => {
       const m = r.member;
-      return [i+1, m.cas, gradeCell(m), m.level, firstWeekCell(m), ...(isGenN ? [m.isBiweekly ? '격주(N)' : '매주'] : []), getUnassignedReason(r), m.possibleScheduleRaw, m.unavailDisplay, m.note, getBroStr(m)];
+      return [i+1, m.cas, gradeCell(m), m.level, firstWeekCell(m), ...(isGenN ? [m.isBiweekly ? '격주(N)' : '매주'] : []), isKanri(m) ? '관리' : '', getUnassignedReason(r), m.possibleScheduleRaw, m.unavailDisplay, m.note, getBroStr(m)];
     });
     if (unRows.length === 0) unRows.push(['미배정 회원 없음']);
     const wsUnassigned = XLSX.utils.aoa_to_sheet([unHeader, ...unRows]);
@@ -2237,7 +2286,7 @@ function downloadExcel() {
     );
 
     const header = [
-      'CAS회원번호','학년','레벨','수업주차','상품','단과여부', ...(isGenN ? ['코칭주기/배정주차'] : []),
+      'CAS회원번호','학년','레벨','수업주차','상품','단과여부','관리', ...(isGenN ? ['코칭주기/배정주차'] : []),
       '가능 시간 조합(현재인원)',
       '탭명','현재탭가능시간대',
       '가능 일정(수기_AJ열)','불가능시간(설문 답변)','특이사항','형제정보'
@@ -2263,7 +2312,7 @@ function downloadExcel() {
       exactFitFlags.push(avSlots.some(isExactFitSlot));
 
       rows.push([
-        m.cas, m.grade, m.level, firstWeekCell(m), productCell(m), singleCourseCell(m),
+        m.cas, m.grade, m.level, firstWeekCell(m), productCell(m), singleCourseCell(m), isKanri(m) ? '관리' : '',
         ...(isGenN ? [(() => {
           const week = avSlots[0] ? avSlots[0].assignedWeek : null;
           return m.isBiweekly ? `격주(N)${week ? ` / ${week}` : ''}` : '매주';
